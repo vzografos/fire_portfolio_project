@@ -1,3 +1,8 @@
+F.I.R.E.  (Financially Independent Retire Early) portfolio software in Python.
+
+
+
+
 Ideas / Core Components / Functionalitiies 
 
 1.   Data Acquisition and Storage:
