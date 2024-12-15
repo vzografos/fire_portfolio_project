@@ -1,5 +1,14 @@
 import pandas as pd
 from typing import Dict, List, Optional, Tuple
+import logging
+from datetime import datetime, timedelta
+from src.data_collection.data_collection_engine import (
+    DataFetchingEngine,
+    DataCollector,
+    ETFDataManager,
+)
+
+logging.basicConfig(level=logging.ERROR)
 
 
 class Portfolio:
@@ -25,6 +34,14 @@ class Portfolio:
         # Performance tracking
         self.initial_value: float = initial_cash
         self.creation_date = pd.Timestamp.now()
+
+        # Initialize data management components
+        fetching_engine = DataFetchingEngine()
+        data_collector = DataCollector(fetching_engine, "yfinance")
+        self.etf_data_manager = ETFDataManager(data_collector)
+
+        self.current_values: Dict[str, float] = {}
+        self.current_values_date: Optional[pd.Timestamp] = None
 
     def add_holding(
         self,
@@ -179,77 +196,81 @@ class Portfolio:
 
         return transaction
 
-    def calculate_portfolio_performance(self, current_prices: Dict[str, float]) -> Dict:
+    def __get_current_prices(self) -> Dict[str, float]:
         """
-        Calculate comprehensive portfolio performance metrics.
-
-        :param current_prices: Current market prices for holdings
-        :return: Dictionary of performance metrics
+        Download the current prices for each holding and return a dictionary.
         """
-        # Current portfolio value
-        current_value = self.get_current_value(current_prices)
+        symbols = list(self.holdings.keys())
+        end_date = datetime.now()
+        # if the current date is a weekend, we need to get the last day's data
+        if end_date.weekday() == 5:
+            end_date = end_date - timedelta(days=1)
+        elif end_date.weekday() == 6:
+            end_date = end_date - timedelta(days=2)
 
-        # Calculate total return
-        total_return = (current_value - self.initial_value) / self.initial_value
+        start_date = end_date - timedelta(days=1)  # Get the last day's data
 
-        # Calculate gains/losses
-        unrealized_gains = {}
-        for symbol, holding in self.holdings.items():
-            current_value = holding["shares"] * current_prices[symbol]
-            cost_basis = holding["shares"] * holding["cost_basis"]
-            unrealized_gains[symbol] = current_value - cost_basis
+        try:
+            data = self.etf_data_manager.get_etf_data(
+                symbols, start_date=start_date, end_date=end_date
+            )
+            self.current_values = data.iloc[-1].to_dict()
+            self.current_values_date = pd.Timestamp.now()
+            return self.current_values
+        except Exception as e:
+            logging.error(f"Error fetching current prices: {str(e)}")
+            raise
 
-        return {
-            "total_value": current_value,
-            "initial_value": self.initial_value,
-            "total_return_percentage": total_return * 100,
-            "unrealized_gains": unrealized_gains,
-            "cash": self.cash,
-            "holdings_count": len(self.holdings),
-        }
-
-    def rebalance(
-        self, target_weights: Dict[str, float], current_prices: Dict[str, float]
-    ):
+    def get_current_values(self, force_update: bool = False) -> Dict[str, float]:
         """
-        Rebalance portfolio to target weights.
+        Get the current values of holdings. If empty, None, or outdated, re-download them.
 
-        :param target_weights: Desired portfolio weights
-        :param current_prices: Current market prices
+        :param force_update: Force re-download of current values
+        :return: Dictionary of current values for each holding
         """
-        total_value = self.get_current_value(current_prices)
+        if (
+            force_update
+            or not self.current_values
+            or self.current_values_date is None
+            or (pd.Timestamp.now() - self.current_values_date)
+            > pd.Timedelta(minutes=15)
+        ):
+            self.__get_current_prices()
+        return self.current_values
 
-        for symbol, target_weight in target_weights.items():
-            target_value = total_value * target_weight
-            current_value = self.holdings.get(symbol, {"shares": 0})[
-                "shares"
-            ] * current_prices.get(symbol, 0)
+    def get_current_value(self) -> Tuple[float, float]:
+        """
+        Calculate the current value and the cost basis of the portfolio.
 
-            if target_value > current_value:
-                # Need to buy
-                shares_to_buy = (target_value - current_value) / current_prices[symbol]
-                self.add_holding(symbol, shares_to_buy, current_prices[symbol])
-            elif target_value < current_value:
-                # Need to sell
-                shares_to_sell = (current_value - target_value) / current_prices[symbol]
-                self.remove_holding(symbol, shares_to_sell)
-
-    def get_current_value(
-        self, current_prices: Dict[str, float]
-    ) -> Tuple[float, float]:
-        """Calculate the current value and the cost basis of the portfolio."""
-
-        # If no current prices provided, use placeholder
-        if current_prices is None:
-            current_prices = {
-                symbol: holding["cost_basis"]
-                for symbol, holding in self.holdings.items()
-            }
+        :return: Tuple of (total portfolio value, total cost basis)
+        """
+        current_prices = self.get_current_values()
 
         total_portfolio_value = self.cash
         total_cost_basis = 0
 
-        # Iterate through holdings
+        for symbol, holding in self.holdings.items():
+            shares = holding["shares"]
+            cost_basis = holding["cost_basis"]
+            current_price = current_prices.get(symbol, cost_basis)
+
+            market_value = shares * current_price
+            total_cost_basis_for_holding = shares * cost_basis
+
+            total_portfolio_value += market_value
+            total_cost_basis += total_cost_basis_for_holding
+
+        return total_portfolio_value, total_cost_basis
+
+    def get_holdings_details(self) -> List[Dict[str, float]]:
+        """
+        Get detailed information about each holding in the portfolio.
+
+        :return: List of dictionaries containing details for each holding
+        """
+        current_prices = self.get_current_values()
+        holdings_details = []
+
         for symbol, holding in self.holdings.items():
             shares = holding["shares"]
             cost_basis = holding["cost_basis"]
@@ -259,37 +280,29 @@ class Portfolio:
             total_cost_basis_for_holding = shares * cost_basis
             gain_loss = market_value - total_cost_basis_for_holding
 
-            # Print holding details
-            print(
-                f"{symbol:<10} {shares:<10.2f} €{cost_basis:<14.2f} €{current_price:<14.2f} €{market_value:<14.2f} €{gain_loss:<14.2f}"
+            holdings_details.append(
+                {
+                    "symbol": symbol,
+                    "shares": shares,
+                    "cost_basis": cost_basis,
+                    "current_price": current_price,
+                    "market_value": market_value,
+                    "gain_loss": gain_loss,
+                }
             )
 
-            total_portfolio_value += market_value
-            total_cost_basis += total_cost_basis_for_holding
-
-        return total_portfolio_value, total_cost_basis
-
-    def get_weights(self, current_prices: Dict[str, float]) -> Dict[str, float]:
-        """Calculate the current weights of each holding in the portfolio."""
-        total_value = self.get_current_value(current_prices)
-        return {
-            symbol: (self.holdings[symbol]["shares"] * current_prices[symbol])
-            / total_value
-            for symbol in self.holdings
-        }
+        return holdings_details
 
     def add_cash(
         self,
         amount: float,
         transaction_date: Optional[pd.Timestamp] = None,
-        source: Optional[str] = None,
     ):
         """
         Add cash to the portfolio.
 
         :param amount: Amount of cash to add
         :param transaction_date: Optional date of the transaction
-        :param source: Optional description of cash source (e.g., 'dividend', 'deposit', 'sale')
         """
         if amount < 0:
             raise ValueError("Cash amount must be positive")
@@ -302,7 +315,6 @@ class Portfolio:
         transaction = {
             "type": "cash_deposit",
             "amount": amount,
-            "source": source,
             "date": transaction_date,
         }
         self.transactions_log.append(transaction)
@@ -311,14 +323,12 @@ class Portfolio:
         self,
         amount: float,
         transaction_date: Optional[pd.Timestamp] = None,
-        purpose: Optional[str] = None,
     ):
         """
         Withdraw cash from the portfolio.
 
         :param amount: Amount of cash to withdraw
         :param transaction_date: Optional date of the transaction
-        :param purpose: Optional description of cash withdrawal purpose
         :raises ValueError: If insufficient funds
         """
         if amount < 0:
@@ -334,16 +344,13 @@ class Portfolio:
         transaction = {
             "type": "cash_withdrawal",
             "amount": amount,
-            "purpose": purpose,
             "date": transaction_date,
         }
         self.transactions_log.append(transaction)
 
-    def display_portfolio(self, current_prices: Optional[Dict[str, float]] = None):
+    def display_portfolio(self):
         """
         Display detailed portfolio information.
-
-        :param current_prices: Optional dictionary of current market prices
         """
         print(f"Portfolio: {self.name}")
         print("=" * 50)
@@ -353,7 +360,7 @@ class Portfolio:
 
         # Display Holdings
         print("\nHOLDINGS:")
-        print("-" * 50)
+        print("-" * 80)
 
         # Table header
         print(
@@ -361,7 +368,15 @@ class Portfolio:
         )
         print("-" * 80)
 
-        total_portfolio_value, total_cost_basis = self.get_current_value(current_prices)
+        holdings_details = self.get_holdings_details()
+        for holding in holdings_details:
+            print(
+                f"{holding['symbol']:<10} {holding['shares']:<10.2f} "
+                f"€{holding['cost_basis']:<14.2f} €{holding['current_price']:<14.2f} "
+                f"€{holding['market_value']:<14.2f} €{holding['gain_loss']:<14.2f}"
+            )
+
+        total_portfolio_value, total_cost_basis = self.get_current_value()
 
         # Portfolio Summary
         print("\nPORTFOLIO SUMMARY:")
@@ -440,7 +455,7 @@ class Portfolio:
             elif transaction["type"] in ["sell", "transfer_out"]:
                 details = f"Shares: {transaction.get('shares', 'N/A'):.2f}, Sale Price: €{transaction.get('current_price', 0):.2f}"
             elif transaction["type"] in ["cash_deposit", "cash_withdrawal"]:
-                details = f"Amount: €{transaction.get('amount', 0):.2f}, Source: {transaction.get('source', transaction.get('purpose', 'N/A'))}"
+                details = f"Amount: €{transaction.get('amount', 0):.2f}"
             else:
                 details = str(transaction)
 

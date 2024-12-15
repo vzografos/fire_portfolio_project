@@ -31,7 +31,7 @@ class DataFetchingEngine:
 
     def fetch_from_yfinance(self, symbols, start_date, end_date):
         try:
-            data = yf.download(symbols, start=start_date, end=end_date)
+            data = yf.download(symbols, start=start_date, end=end_date, progress=False)
             return data["Adj Close"]
         except Exception as e:
             logging.error(f"Error fetching data from yfinance: {str(e)}")
@@ -64,9 +64,14 @@ class ETFDataManager:
         self.raw_data = None
         self.processed_data = None
 
-    def get_etf_data(self, symbols, years=5):
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=365 * years)
+    def get_etf_data(self, symbols, start_date=None, end_date=None):
+
+        if not end_date:
+            end_date = datetime.now()
+        if not start_date:
+            start_date = end_date - timedelta(
+                days=365 * 5
+            )  # 5 years of data as default
         self.raw_data = self.data_collector.collect_data(symbols, start_date, end_date)
         return self.raw_data
 
